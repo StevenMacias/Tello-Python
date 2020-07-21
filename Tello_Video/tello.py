@@ -25,16 +25,19 @@ class Tello:
         self.decoder = libh264decoder.H264Decoder()
         self.command_timeout = command_timeout
         self.imperial = imperial
-        self.response = None  
+        self.response = None
         self.frame = None  # numpy array BGR -- current camera output frame
         self.is_freeze = False  # freeze current camera output
         self.last_frame = None
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  # socket for sending cmd
         self.socket_video = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  # socket for receiving video stream
+        self.socket_status = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.tello_address = (tello_ip, tello_port)
         self.local_video_port = 11111  # port for receiving video stream
+        self.local_status_port = 8890
         self.last_height = 0
         self.socket.bind((local_ip, local_port))
+        self.status_data_dict = {}
 
         # thread for receiving cmd ack
         self.receive_thread = threading.Thread(target=self._receive_thread)
@@ -49,6 +52,7 @@ class Tello:
         print ('sent: streamon')
 
         self.socket_video.bind((local_ip, self.local_video_port))
+        self.socket_status.bind((local_ip, self.local_status_port))
 
         # thread for receiving video
         self.receive_video_thread = threading.Thread(target=self._receive_video_thread)
@@ -56,12 +60,18 @@ class Tello:
 
         self.receive_video_thread.start()
 
+        # thread for receiving status
+        self.receive_status_thread = threading.Thread(target=self._receive_status_thread)
+        self.receive_status_thread.daemon = True
+
+        self.receive_status_thread.start()
+
     def __del__(self):
         """Closes the local socket."""
 
         self.socket.close()
         self.socket_video.close()
-    
+
     def read(self):
         """Return the last frame from camera."""
         if self.is_freeze:
@@ -108,13 +118,35 @@ class Tello:
 
             except socket.error as exc:
                 print ("Caught exception socket.error : %s" % exc)
-    
+
+    def _receive_status_thread(self):
+        """
+        Listens for status from the Tello.
+
+        Runs as a thread, sets self. to the most recent status.
+
+        """
+        packet_data = ""
+        while True:
+            try:
+                res_string, ip = self.socket_status.recvfrom(256)
+                packet_data += res_string
+                #self.status_data_dict = (dict(map(str.strip, line.split(':', 1)) for line in res_string.split(";")[0:-1]))
+                for entry in res_string.split(";")[0:-1]:
+                    var = entry.split(":")
+                    self.status_data_dict[var[0]] = float(var[1])
+                #print(self.status_data_dict)
+                packet_data = ""
+
+            except socket.error as exc:
+                print ("Caught exception stauts_socket.error : %s" % exc)
+
     def _h264_decode(self, packet_data):
         """
         decode raw h264 format data from Tello
-        
+
         :param packet_data: raw h264 data array
-       
+
         :return: a list of decoded frame
         """
         res_frame_list = []
@@ -131,6 +163,8 @@ class Tello:
 
         return res_frame_list
 
+    def get_status(self):
+        return self.status_data_dict
     def send_command(self, command):
         """
         Send a command to the Tello and wait for a response.
@@ -151,7 +185,7 @@ class Tello:
             if self.abort_flag is True:
                 break
         timer.cancel()
-        
+
         if self.response is None:
             response = 'none_response'
         else:
@@ -160,13 +194,13 @@ class Tello:
         self.response = None
 
         return response
-    
+
     def set_abort_flag(self):
         """
         Sets self.abort_flag to True.
 
         Used by the timer in Tello.send_command() to indicate to that a response
-        
+
         timeout has occurred.
 
         """
@@ -288,7 +322,7 @@ class Tello:
             int: Percent battery life remaining.
 
         """
-        
+
         battery = self.send_command('battery?')
 
         try:
